@@ -1,0 +1,49 @@
+name: Manually deploy production
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Type DEPLOY to approve publishing the current main branch'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'DEPLOY'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Upload fingerprinted assets first
+        env:
+          SITE_BUCKET: ${{ vars.SITE_BUCKET }}
+        run: aws s3 sync out/_next/ "s3://$SITE_BUCKET/_next/" --cache-control 'public,max-age=31536000,immutable'
+      - name: Publish pages without removing previous assets
+        env:
+          SITE_BUCKET: ${{ vars.SITE_BUCKET }}
+        run: aws s3 sync out/ "s3://$SITE_BUCKET/" --exclude '_next/*' --cache-control 'public,max-age=0,must-revalidate'
+      - name: Refresh CDN
+        env:
+          DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+        run: aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths '/*'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: production-${{ github.sha }}
+          path: out/
+          retention-days: 30
